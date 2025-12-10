@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web SSH Terminal</title>
+    
+    <!-- xterm.js from CDN -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+    
+    <!-- JetBrains Mono - excellent monospace font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-tertiary: #1a1a24;
+            --border-color: #2a2a3a;
+            --text-primary: #e0e0e8;
+            --text-secondary: #8888a0;
+            --accent-red: #ff4444;
+            --accent-blue: #4488ff;
+            --accent-green: #44ff88;
+            --accent-yellow: #ffcc44;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* Header / Connection Bar */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .logo {
+            font-weight: 700;
+            font-size: 1.1rem;
+            color: var(--accent-blue);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .logo::before {
+            content: ">";
+            color: var(--accent-green);
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .connection-form {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .input-group label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .input-group input {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        
+        .input-group input:focus {
+            border-color: var(--accent-blue);
+        }
+        
+        .input-group input::placeholder {
+            color: var(--text-secondary);
+        }
+        
+        #ssh-host { width: 180px; }
+        #ssh-user { width: 100px; }
+        #ssh-port { width: 70px; }
+        
+        .btn {
+            background: var(--accent-blue);
+            color: var(--bg-primary);
+            border: none;
+            padding: 8px 20px;
+            border-radius: 4px;
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .btn:hover {
+            background: #5599ff;
+            transform: translateY(-1px);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .btn-disconnect {
+            background: var(--accent-red);
+        }
+        
+        .btn-disconnect:hover {
+            background: #ff6666;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        /* Status indicator */
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+            font-size: 0.85rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+            transition: background 0.3s;
+        }
+        
+        .status-dot.connected {
+            background: var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
+        }
+        
+        .status-dot.connecting {
+            background: var(--accent-yellow);
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        
+        /* Terminal container */
+        .terminal-wrapper {
+            flex: 1;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .terminal-container {
+            flex: 1;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        /* Terminal title bar */
+        .terminal-titlebar {
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-color);
+            padding: 8px 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .window-buttons {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .window-btn {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--border-color);
+        }
+        
+        .window-btn.close { background: var(--accent-red); }
+        .window-btn.minimize { background: var(--accent-yellow); }
+        .window-btn.maximize { background: var(--accent-green); }
+        
+        .terminal-title {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        
+        /* xterm.js container */
+        #terminal {
+            height: calc(100% - 40px);
+            padding: 8px;
+        }
+        
+        /* Welcome overlay */
+        .welcome-overlay {
+            position: absolute;
+            inset: 40px 0 0 0;
+            background: var(--bg-secondary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            transition: opacity 0.3s;
+        }
+        
+        .welcome-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .welcome-text {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-secondary);
+            text-align: center;
+            line-height: 1.8;
+        }
+        
+        .welcome-text .prompt {
+            color: var(--accent-green);
+        }
+        
+        .welcome-text .command {
+            color: var(--text-primary);
+        }
+        
+        /* Footer */
+        .footer {
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            padding: 8px 20px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .shortcut {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .shortcut kbd {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            padding: 2px 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">Web SSH Terminal</div>
+        
+        <form class="connection-form" id="connection-form">
+            <div class="input-group">
+                <label for="ssh-user">User</label>
+                <input type="text" id="ssh-user" placeholder="pi" value="pi">
+            </div>
+            <div class="input-group">
+                <label for="ssh-host">Host</label>
+                <input type="text" id="ssh-host" placeholder="192.168.1.100" autofocus>
+            </div>
+            <div class="input-group">
+                <label for="ssh-port">Port</label>
+                <input type="number" id="ssh-port" placeholder="22" value="22">
+            </div>
+            <button type="submit" class="btn" id="connect-btn">Connect</button>
+            <button type="button" class="btn btn-disconnect" id="disconnect-btn" disabled>Disconnect</button>
+        </form>
+        
+        <div class="status">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-text">Disconnected</span>
+        </div>
+    </header>
+    
+    <main class="terminal-wrapper">
+        <div class="terminal-container">
+            <div class="terminal-titlebar">
+                <div class="window-buttons">
+                    <div class="window-btn close"></div>
+                    <div class="window-btn minimize"></div>
+                    <div class="window-btn maximize"></div>
+                </div>
+                <span class="terminal-title" id="terminal-title">ssh://</span>
+            </div>
+            <div id="terminal"></div>
+            
+            <div class="welcome-overlay" id="welcome-overlay">
+                <div class="welcome-text">
+                    <span class="prompt">$</span> <span class="command">Enter connection details above and click Connect</span><br>
+                    <span class="prompt">$</span> <span class="command">or press Enter in the Host field</span>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <footer class="footer">
+        <div>
+            <span class="shortcut"><kbd>Ctrl</kbd>+<kbd>C</kbd> Interrupt</span>
+            &nbsp;&nbsp;
+            <span class="shortcut"><kbd>Ctrl</kbd>+<kbd>D</kbd> EOF/Logout</span>
+        </div>
+        <div>Web SSH Terminal v1.0 • Red Blue Sun Tzu Project</div>
+    </footer>
+
+    <script>
+        // Terminal setup
+        const terminalEl = document.getElementById('terminal');
+        const welcomeOverlay = document.getElementById('welcome-overlay');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const terminalTitle = document.getElementById('terminal-title');
+        const connectBtn = document.getElementById('connect-btn');
+        const disconnectBtn = document.getElementById('disconnect-btn');
+        const connectionForm = document.getElementById('connection-form');
+        
+        // Initialize xterm.js
+        const term = new Terminal({
+            cursorBlink: true,
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: 14,
+            lineHeight: 1.2,
+            theme: {
+                background: '#12121a',
+                foreground: '#e0e0e8',
+                cursor: '#4488ff',
+                cursorAccent: '#12121a',
+                selectionBackground: '#4488ff44',
+                black: '#1a1a24',
+                red: '#ff4444',
+                green: '#44ff88',
+                yellow: '#ffcc44',
+                blue: '#4488ff',
+                magenta: '#cc44ff',
+                cyan: '#44ccff',
+                white: '#e0e0e8',
+                brightBlack: '#4a4a5a',
+                brightRed: '#ff6666',
+                brightGreen: '#66ffaa',
+                brightYellow: '#ffdd66',
+                brightBlue: '#66aaff',
+                brightMagenta: '#dd66ff',
+                brightCyan: '#66ddff',
+                brightWhite: '#ffffff'
+            }
+        });
+        
+        // Addons
+        const fitAddon = new FitAddon.FitAddon();
+        const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+        
+        term.loadAddon(fitAddon);
+        term.loadAddon(webLinksAddon);
+        term.open(terminalEl);
+        fitAddon.fit();
+        
+        // WebSocket connection
+        let ws = null;
+        
+        function setStatus(status, text) {
+            statusDot.className = 'status-dot ' + status;
+            statusText.textContent = text;
+        }
+        
+        function connect() {
+            const host = document.getElementById('ssh-host').value.trim();
+            const user = document.getElementById('ssh-user').value.trim() || 'pi';
+            const port = document.getElementById('ssh-port').value || '22';
+            
+            if (!host) {
+                alert('Please enter a host address');
+                return;
+            }
+            
+            // Update UI
+            setStatus('connecting', 'Connecting...');
+            terminalTitle.textContent = `ssh://${user}@${host}:${port}`;
+            welcomeOverlay.classList.add('hidden');
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = false;
+            
+            // Clear terminal
+            term.clear();
+            term.focus();
+            
+            // Build WebSocket URL
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}/ws/terminal?host=${encodeURIComponent(host)}&user=${encodeURIComponent(user)}&port=${port}`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                setStatus('connected', `Connected to ${host}`);
+                // Send initial terminal size
+                sendResize();
+            };
+            
+            ws.onmessage = (event) => {
+                // Handle binary data from PTY
+                if (event.data instanceof Blob) {
+                    event.data.arrayBuffer().then(buffer => {
+                        const text = new TextDecoder().decode(buffer);
+                        term.write(text);
+                    });
+                } else {
+                    term.write(event.data);
+                }
+            };
+            
+            ws.onclose = () => {
+                setStatus('', 'Disconnected');
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                term.writeln('\r\n\x1b[33m[Connection closed]\x1b[0m');
+            };
+            
+            ws.onerror = (error) => {
+                setStatus('', 'Error');
+                console.error('WebSocket error:', error);
+                term.writeln('\r\n\x1b[31m[Connection error]\x1b[0m');
+            };
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+        
+        function sendResize() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'resize',
+                    rows: term.rows,
+                    cols: term.cols
+                }));
+            }
+        }
+        
+        // Handle user input
+        term.onData(data => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'input',
+                    data: data
+                }));
+            }
+        });
+        
+        // Handle terminal resize
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+            sendResize();
+        });
+        
+        // Form submission
+        connectionForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            connect();
+        });
+        
+        disconnectBtn.addEventListener('click', disconnect);
+        
+        // Focus host input on load
+        document.getElementById('ssh-host').focus();
+    </script>
+</body>
+</html>
