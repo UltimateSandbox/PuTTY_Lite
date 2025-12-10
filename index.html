@@ -111,9 +111,10 @@
             color: var(--text-secondary);
         }
         
-        #ssh-host { width: 180px; }
-        #ssh-user { width: 100px; }
-        #ssh-port { width: 70px; }
+        #ssh-host { width: 160px; }
+        #ssh-user { width: 90px; }
+        #ssh-password { width: 120px; }
+        #ssh-port { width: 60px; }
         
         .btn {
             background: var(--accent-blue);
@@ -178,6 +179,10 @@
         .status-dot.connecting {
             background: var(--accent-yellow);
             animation: pulse 1s infinite;
+        }
+        
+        .status-dot.error {
+            background: var(--accent-red);
         }
         
         @keyframes pulse {
@@ -310,6 +315,10 @@
                 <input type="text" id="ssh-user" placeholder="pi" value="pi">
             </div>
             <div class="input-group">
+                <label for="ssh-password">Password</label>
+                <input type="password" id="ssh-password" placeholder="••••••••">
+            </div>
+            <div class="input-group">
                 <label for="ssh-host">Host</label>
                 <input type="text" id="ssh-host" placeholder="192.168.1.100" autofocus>
             </div>
@@ -342,7 +351,7 @@
             <div class="welcome-overlay" id="welcome-overlay">
                 <div class="welcome-text">
                     <span class="prompt">$</span> <span class="command">Enter connection details above and click Connect</span><br>
-                    <span class="prompt">$</span> <span class="command">or press Enter in the Host field</span>
+                    <span class="prompt">$</span> <span class="command">or press Enter in any field</span>
                 </div>
             </div>
         </div>
@@ -419,10 +428,16 @@
         function connect() {
             const host = document.getElementById('ssh-host').value.trim();
             const user = document.getElementById('ssh-user').value.trim() || 'pi';
-            const port = document.getElementById('ssh-port').value || '22';
+            const password = document.getElementById('ssh-password').value;
+            const port = parseInt(document.getElementById('ssh-port').value) || 22;
             
             if (!host) {
                 alert('Please enter a host address');
+                return;
+            }
+            
+            if (!password) {
+                alert('Please enter a password');
                 return;
             }
             
@@ -439,25 +454,35 @@
             
             // Build WebSocket URL
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/ws/terminal?host=${encodeURIComponent(host)}&user=${encodeURIComponent(user)}&port=${port}`;
+            const wsUrl = `${wsProtocol}//${window.location.host}/ws/terminal`;
             
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
-                setStatus('connected', `Connected to ${host}`);
-                // Send initial terminal size
-                sendResize();
+                // Send connection request with credentials
+                ws.send(JSON.stringify({
+                    type: 'connect',
+                    host: host,
+                    port: port,
+                    username: user,
+                    password: password
+                }));
             };
             
             ws.onmessage = (event) => {
-                // Handle binary data from PTY
-                if (event.data instanceof Blob) {
-                    event.data.arrayBuffer().then(buffer => {
-                        const text = new TextDecoder().decode(buffer);
-                        term.write(text);
-                    });
-                } else {
-                    term.write(event.data);
+                const msg = JSON.parse(event.data);
+                
+                if (msg.type === 'connected') {
+                    setStatus('connected', `Connected to ${host}`);
+                    // Send initial terminal size
+                    sendResize();
+                } else if (msg.type === 'output') {
+                    term.write(msg.data);
+                } else if (msg.type === 'error') {
+                    setStatus('error', 'Error');
+                    term.writeln(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m`);
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
                 }
             };
             
@@ -469,7 +494,7 @@
             };
             
             ws.onerror = (error) => {
-                setStatus('', 'Error');
+                setStatus('error', 'Error');
                 console.error('WebSocket error:', error);
                 term.writeln('\r\n\x1b[31m[Connection error]\x1b[0m');
             };

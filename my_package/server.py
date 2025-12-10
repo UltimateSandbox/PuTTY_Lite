@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-Web SSH Terminal Server
-=======================
+Web SSH Terminal Server (Windows Compatible)
+=============================================
 A FastAPI server that bridges SSH sessions to the browser via WebSocket.
-
-Architecture:
-- Spawns a PTY (pseudo-terminal) running SSH
-- WebSocket connects browser to PTY
-- xterm.js on frontend renders the terminal
+Uses Paramiko for SSH, so it works on Windows, macOS, and Linux.
 
 Usage:
     python server.py --host 0.0.0.0 --port 8765
@@ -17,115 +13,110 @@ Then open http://localhost:8765 in your browser.
 
 import asyncio
 import argparse
-import fcntl
-import os
-import pty
-import signal
-import struct
-import termios
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
+import paramiko
 import uvicorn
 
 
 app = FastAPI(title="Web SSH Terminal")
 
 
-class PTYProcess:
+class SSHSession:
     """
-    Manages a pseudo-terminal process (like SSH).
-    
-    The PTY gives us a "fake" terminal that the SSH process thinks
-    is a real terminal, so it behaves normally with colors, cursor
-    movement, etc.
+    Manages an SSH connection using Paramiko.
+    Works on Windows, macOS, and Linux.
     """
     
     def __init__(self):
-        self.fd: Optional[int] = None  # File descriptor for the PTY
-        self.pid: Optional[int] = None  # Process ID of the child
+        self.client: Optional[paramiko.SSHClient] = None
+        self.channel: Optional[paramiko.Channel] = None
+        self.connected = False
         
-    def spawn(self, command: list[str]) -> bool:
+    def connect(self, host: str, port: int, username: str, password: str) -> tuple[bool, str]:
         """
-        Spawn a new process in a PTY.
+        Connect to SSH server.
         
-        Args:
-            command: Command to run, e.g., ["ssh", "user@host"]
-            
         Returns:
-            True if successful, False otherwise
+            (success, message) tuple
         """
         try:
-            # Fork a new process with a PTY
-            # - pid: 0 in child, child's PID in parent
-            # - fd: file descriptor for the PTY master side
-            self.pid, self.fd = pty.fork()
+            self.client = paramiko.SSHClient()
+            # Auto-add unknown host keys (like ssh -o StrictHostKeyChecking=no)
+            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             
-            if self.pid == 0:
-                # We're in the child process - execute the command
-                os.execvp(command[0], command)
-            else:
-                # We're in the parent - set non-blocking IO
-                flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
-                fcntl.fcntl(self.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                return True
-                
+            self.client.connect(
+                hostname=host,
+                port=port,
+                username=username,
+                password=password,
+                timeout=10,
+                allow_agent=False,
+                look_for_keys=False
+            )
+            
+            # Get an interactive shell channel
+            self.channel = self.client.invoke_shell(
+                term='xterm-256color',
+                width=80,
+                height=24
+            )
+            self.channel.setblocking(0)  # Non-blocking reads
+            self.connected = True
+            
+            return True, "Connected"
+            
+        except paramiko.AuthenticationException:
+            return False, "Authentication failed - check username/password"
+        except paramiko.SSHException as e:
+            return False, f"SSH error: {e}"
         except Exception as e:
-            print(f"Failed to spawn PTY: {e}")
-            return False
+            return False, f"Connection failed: {e}"
     
-    def resize(self, rows: int, cols: int) -> None:
-        """
-        Resize the PTY to match the browser terminal size.
-        
-        This is important! Without this, programs like vim or htop
-        won't know how big the terminal is and will render incorrectly.
-        """
-        if self.fd is not None:
-            # TIOCSWINSZ = "Terminal IO Control - Set WINdow SiZe"
-            winsize = struct.pack("HHHH", rows, cols, 0, 0)
-            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, winsize)
+    def resize(self, width: int, height: int) -> None:
+        """Resize the terminal."""
+        if self.channel:
+            try:
+                self.channel.resize_pty(width=width, height=height)
+            except:
+                pass
     
     def read(self) -> bytes:
-        """Read available output from the PTY (non-blocking)."""
-        if self.fd is None:
+        """Read available output from SSH channel (non-blocking)."""
+        if not self.channel:
             return b""
         try:
-            return os.read(self.fd, 4096)
-        except BlockingIOError:
+            if self.channel.recv_ready():
+                return self.channel.recv(4096)
             return b""
-        except OSError:
+        except:
             return b""
     
     def write(self, data: bytes) -> None:
-        """Write input to the PTY (what the user types)."""
-        if self.fd is not None:
+        """Write input to SSH channel."""
+        if self.channel:
             try:
-                os.write(self.fd, data)
-            except OSError:
+                self.channel.send(data)
+            except:
                 pass
     
-    def terminate(self) -> None:
-        """Clean up the PTY and child process."""
-        if self.pid is not None:
+    def close(self) -> None:
+        """Close the SSH connection."""
+        self.connected = False
+        if self.channel:
             try:
-                os.kill(self.pid, signal.SIGTERM)
-                os.waitpid(self.pid, 0)
-            except (OSError, ChildProcessError):
+                self.channel.close()
+            except:
                 pass
-        if self.fd is not None:
+        if self.client:
             try:
-                os.close(self.fd)
-            except OSError:
+                self.client.close()
+            except:
                 pass
-        self.fd = None
-        self.pid = None
-
-
-# Store active PTY sessions (in production, you'd want session management)
-active_sessions: dict[str, PTYProcess] = {}
+        self.channel = None
+        self.client = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -135,78 +126,79 @@ async def get_terminal_page():
 
 
 @app.websocket("/ws/terminal")
-async def terminal_websocket(
-    websocket: WebSocket,
-    host: str = "localhost",
-    user: str = "pi",
-    port: int = 22
-):
+async def terminal_websocket(websocket: WebSocket):
     """
     WebSocket endpoint that bridges the browser to an SSH session.
     
-    Query params:
-        host: SSH host to connect to
-        user: SSH username
-        port: SSH port (default 22)
-    
     Protocol:
+        - Client sends JSON: {"type": "connect", "host": "...", "port": 22, "username": "...", "password": "..."}
         - Client sends JSON: {"type": "input", "data": "..."} for keystrokes
-        - Client sends JSON: {"type": "resize", "rows": N, "cols": M} for resize
-        - Server sends raw terminal output as binary
+        - Client sends JSON: {"type": "resize", "cols": N, "rows": M} for resize
+        - Server sends JSON: {"type": "output", "data": "..."} for terminal output
+        - Server sends JSON: {"type": "error", "message": "..."} for errors
+        - Server sends JSON: {"type": "connected"} on successful connection
     """
     await websocket.accept()
     
-    # Create and spawn the PTY with SSH
-    pty_process = PTYProcess()
-    ssh_command = ["ssh", "-o", "StrictHostKeyChecking=no", "-p", str(port), f"{user}@{host}"]
+    ssh_session = SSHSession()
     
-    if not pty_process.spawn(ssh_command):
-        await websocket.send_text('{"error": "Failed to spawn SSH process"}')
-        await websocket.close()
-        return
-    
-    session_id = str(id(websocket))
-    active_sessions[session_id] = pty_process
-    
-    async def read_pty_output():
-        """Continuously read from PTY and send to browser."""
-        while True:
-            await asyncio.sleep(0.01)  # Small delay to batch output
-            data = pty_process.read()
+    async def read_ssh_output():
+        """Continuously read from SSH and send to browser."""
+        while ssh_session.connected:
+            await asyncio.sleep(0.02)  # Small delay to batch output
+            data = ssh_session.read()
             if data:
                 try:
-                    await websocket.send_bytes(data)
+                    # Send as text (base64 or decoded)
+                    await websocket.send_json({
+                        "type": "output",
+                        "data": data.decode('utf-8', errors='replace')
+                    })
                 except:
                     break
     
-    # Start the output reader task
-    output_task = asyncio.create_task(read_pty_output())
+    output_task = None
     
     try:
         while True:
-            # Receive input from browser
             message = await websocket.receive_json()
+            msg_type = message.get("type")
             
-            if message.get("type") == "input":
-                # User typed something - send to PTY
-                data = message.get("data", "")
-                pty_process.write(data.encode())
+            if msg_type == "connect":
+                # New connection request
+                host = message.get("host", "localhost")
+                port = message.get("port", 22)
+                username = message.get("username", "pi")
+                password = message.get("password", "")
                 
-            elif message.get("type") == "resize":
-                # Browser terminal resized - update PTY
-                rows = message.get("rows", 24)
+                success, msg = ssh_session.connect(host, port, username, password)
+                
+                if success:
+                    await websocket.send_json({"type": "connected"})
+                    # Start reading output
+                    output_task = asyncio.create_task(read_ssh_output())
+                else:
+                    await websocket.send_json({"type": "error", "message": msg})
+                
+            elif msg_type == "input":
+                # User typed something
+                data = message.get("data", "")
+                ssh_session.write(data.encode())
+                
+            elif msg_type == "resize":
+                # Terminal resized
                 cols = message.get("cols", 80)
-                pty_process.resize(rows, cols)
+                rows = message.get("rows", 24)
+                ssh_session.resize(cols, rows)
                 
     except WebSocketDisconnect:
-        print(f"Client disconnected: {session_id}")
+        print("Client disconnected")
     except Exception as e:
         print(f"WebSocket error: {e}")
     finally:
-        # Clean up
-        output_task.cancel()
-        pty_process.terminate()
-        active_sessions.pop(session_id, None)
+        if output_task:
+            output_task.cancel()
+        ssh_session.close()
 
 
 def main():
@@ -217,9 +209,9 @@ def main():
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║                    Web SSH Terminal                          ║
+║              Web SSH Terminal (Windows Compatible)           ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Server running at: http://{args.host}:{args.port:<5}                      ║
+║  Server running at: http://localhost:{args.port:<5}                    ║
 ║                                                              ║
 ║  Open in browser and enter your SSH connection details.      ║
 ║  Press Ctrl+C to stop the server.                            ║
